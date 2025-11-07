@@ -80,7 +80,7 @@ backend/data/
 
 Run the ingestion script
 
-python ingest.py
+python -m app.services.ingest_service
 
 
 This script will:
