@@ -1,0 +1,41 @@
+# ============================================================
+# UiTM RAG System – Stable Configuration (Python 3.12+)
+# Switched from Docling to PyMuPDF4LLM for PDF ingestion
+# ============================================================
+
+# === Core Framework ===
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+
+# === Core Dependencies ===
+numpy>=1.26.4,<2.0.0        # Ensures compatibility with torch & chromadb
+pandas>=2.2.0,<3.0.0
+
+# === Machine Learning & Embeddings ===
+torch>=2.1.0,<2.3.0
+transformers>=4.42.0,<4.45.0
+sentence-transformers==3.0.1
+
+# === Vector Database ===
+chromadb==0.5.3
+pypika==0.48.9              # Prevents build errors for Chroma on Windows
+
+# === PDF Extraction (Lightweight, No ONNX Models) ===
+pymupdf>=1.24.0,<1.25.0
+pymupdf4llm>=0.0.6,<0.1.0   # Markdown & LLM-friendly extraction
+PyPDF2==3.0.1               # Optional fallback parser
+
+# === Utilities ===
+pydantic>=2.5.0,<3.0.0
+python-dotenv==1.0.1
+requests>=2.31.0,<2.33.0
+
+# === Testing ===
+pytest==8.2.1
+
+# === Image / OCR (Optional) ===
+opencv-python>=4.8.0,<4.12.0
+Pillow>=10.0.0,<11.0.0
+
+# === Settings Management ===
+pydantic-settings>=2.0.0,<3.0.0
