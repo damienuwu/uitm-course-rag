@@ -15,13 +15,8 @@ OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
 
-# ChromaDB configuration
 COLLECTION_NAME = "uitm_programs"
 
-# API configuration
-API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
-
-# Convert paths to strings for compatibility
+# Convert paths to strings
 CHROMA_DIR_STR = str(CHROMA_DIR)
 DATA_DIR_STR = str(DATA_DIR)

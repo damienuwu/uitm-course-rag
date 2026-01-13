@@ -1,7 +1,7 @@
 import subprocess
 import json
 import requests
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Generator
 from .config import OLLAMA_MODEL, OLLAMA_API_URL
 
 # Try to use requests if available, fallback to subprocess
@@ -9,15 +9,17 @@ USE_API = True
 
 def query_ollama(
     prompt: str, 
+    model: Optional[str] = None,  # Added model parameter
     max_tokens: int = 2048, 
     temperature: float = 0.3,
     timeout: int = 120
 ) -> str:
     """
-    Query Ollama with optimized settings for Malaysian text.
+    Query Ollama with optimized settings.
     
     Args:
         prompt: The input prompt
+        model: Specific model to use (defaults to config OLLAMA_MODEL)
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature (0.0-1.0)
         timeout: Request timeout in seconds
@@ -25,14 +27,18 @@ def query_ollama(
     Returns:
         Generated text response
     """
+    # Use the provided model or fallback to the default in config
+    target_model = model or OLLAMA_MODEL
+
     if USE_API:
-        return _query_ollama_api(prompt, max_tokens, temperature, timeout)
+        return _query_ollama_api(prompt, target_model, max_tokens, temperature, timeout)
     else:
-        return _query_ollama_cli(prompt, timeout)
+        return _query_ollama_cli(prompt, target_model, timeout)
 
 
 def _query_ollama_api(
     prompt: str, 
+    model: str, 
     max_tokens: int, 
     temperature: float,
     timeout: int
@@ -42,7 +48,7 @@ def _query_ollama_api(
     """
     try:
         payload = {
-            "model": OLLAMA_MODEL,
+            "model": model,  # Use the passed model
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -84,13 +90,13 @@ def _query_ollama_api(
         return f"⚠️ Ralat API Ollama: {str(e)}"
 
 
-def _query_ollama_cli(prompt: str, timeout: int) -> str:
+def _query_ollama_cli(prompt: str, model: str, timeout: int) -> str:
     """
     Query Ollama via CLI (fallback method)
     """
     try:
         result = subprocess.run(
-            ["ollama", "run", OLLAMA_MODEL],
+            ["ollama", "run", model],  # Use the passed model
             input=prompt.encode("utf-8"),
             capture_output=True,
             timeout=timeout
@@ -105,7 +111,7 @@ def _query_ollama_cli(prompt: str, timeout: int) -> str:
                 print(f"stderr: {stderr}")
             return "⚠️ Tiada respons daripada model Ollama."
 
-        # Try to parse JSON response
+        # Try to parse JSON response (in case CLI returns JSON)
         try:
             data = json.loads(output)
             if "response" in data:
@@ -130,19 +136,19 @@ def _query_ollama_cli(prompt: str, timeout: int) -> str:
 
 def query_ollama_stream(
     prompt: str,
+    model: Optional[str] = None,  # Added model parameter
     max_tokens: int = 2048,
     temperature: float = 0.3,
     timeout: int = 120
-):
+) -> Generator[str, None, None]:
     """
     Query Ollama with streaming response (for real-time UI updates)
-    
-    Yields:
-        Chunks of generated text
     """
+    target_model = model or OLLAMA_MODEL
+
     try:
         payload = {
-            "model": OLLAMA_MODEL,
+            "model": target_model,  # Use the passed model
             "prompt": prompt,
             "stream": True,
             "options": {

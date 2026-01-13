@@ -8,7 +8,7 @@ export default function Home() {
       </h1>
       <ChatBox />
       <footer className="text-center text-sm text-gray-500 mt-10">
-        © {new Date().getFullYear()} UiTM Course RAG System — Powered by llama3.2:3b + E5-Base
+        © {new Date().getFullYear()} UiTM Course RAG System
       </footer>
     </main>
   );
