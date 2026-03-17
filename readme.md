@@ -1,9 +1,11 @@
-UiTM RAG Course Search System
+# UiTM RAG Course Search System
 
-A Retrieval-Augmented Generation (RAG) web application designed to help students explore and match UiTM courses efficiently.
-Built with FastAPI (Python) for the backend and Next.js (React) for the frontend.
+A Retrieval-Augmented Generation (RAG) web application designed to help students explore and match UiTM courses efficiently. Built with **FastAPI (Python)** for the backend and **Next.js (React)** for the frontend.
+
+---
 
 ## 🚀 Features
+
 ✅ Intelligent course recommendation using AI (RAG)  
 ✅ Fast, interactive web interface (Next.js)  
 ✅ RESTful API built with FastAPI  
@@ -12,145 +14,135 @@ Built with FastAPI (Python) for the backend and Next.js (React) for the frontend
 
 ---
 
-🧩 Project Structure
-
-uitm-rag/
-│
-├── backend/ # FastAPI backend (Python)
-│ ├── app/
-│ ├── data/ # Source PDF files
-│ ├── embeddings/ # Stored vector database
-│ ├── ingest.py # Script for document ingestion
-│ ├── main.py # FastAPI app entry point
-│ └── requirements.txt
-│
-├── frontend/ # Next.js frontend
-│ ├── package.json
-│ ├── next.config.js
-│ └── app/ or pages/
-│
-├── .gitignore
-└── README.md
-
-## ⚙️ Installation Setup
+## ⚙️ Installation & Setup
 
 ### 🔹 Prerequisites
+
 Make sure you have these installed:
+
 - [Python 3.10+](https://www.python.org/downloads/)
 - [Node.js 18+](https://nodejs.org/)
-- [npm](https://www.npmjs.com/) or [Yarn](https://yarnpkg.com/)
+- [npm](https://www.npmjs.com/)
 - [Git](https://git-scm.com/)
 
 ---
 
-🧱 Backend Setup (FastAPI + RAG Engine)
+## 🧱 Backend Setup (FastAPI + RAG Engine)
 
-Navigate to the backend folder:
+### 1. Navigate to the backend folder
 
+```bash
 cd backend
+```
 
+### 2. Create and activate a virtual environment
 
-Create and activate a virtual environment
-
-Windows:
-
+**Windows:**
+```bash
 python -m venv venv
 venv\Scripts\activate
+```
 
-
-macOS/Linux:
-
+**macOS/Linux:**
+```bash
 python3 -m venv venv
 source venv/bin/activate
+```
 
+### 3. Install dependencies
 
-Install dependencies
-
+```bash
 pip install -r requirements.txt
+```
 
-📚 Ingest Course Files (Important!)
+---
 
-Before running the backend, you must ingest the UiTM course documents (PDFs)
-so that embeddings and vector storage can be created.
+## 📚 Ingest Course Files (Important!)
 
-Place your PDF files (e.g. UiTM-BUKU-SYARAT.pdf) in:
+Before running the backend, you must ingest the UiTM course documents (PDFs) so that embeddings and vector storage can be created.
 
+### 1. Place your PDF files in:
+
+```
 backend/data/
+```
 
+> Example: `UiTM-BUKU-SYARAT.pdf`
 
-Run the ingestion script
+### 2. Run the ingestion script
 
+```bash
 python -m app.services.ingest_service
-
+```
 
 This script will:
-
-Parse the PDF documents
-
-Generate text embeddings
-
-Store them in backend/embeddings/ (ChromaDB or vector database)
+- Parse the PDF documents
+- Generate text embeddings
+- Store them in `backend/embeddings/` (ChromaDB or vector database)
 
 You should see output like:
 
+```
 ✅ Ingestion complete. 1 document indexed.
+```
 
-🚀 Run the Backend API
+---
+
+## 🚀 Run the Backend API
 
 Once ingestion is done, start the FastAPI server:
 
+```bash
 uvicorn app.main:app --reload --port 8000
+```
 
+| Resource | URL |
+|---|---|
+| 📍 Backend API | http://127.0.0.1:8000 |
+| 📘 API Docs (Swagger) | http://127.0.0.1:8000/docs |
 
-📍 Backend running at:
-http://127.0.0.1:8000
+---
 
-📘 API docs:
-http://127.0.0.1:8000/docs
+## 💻 Frontend Setup (Next.js)
 
-💻 Frontend Setup (Next.js)
+### 1. Open a new terminal (keep the backend running)
 
-Open a new terminal (keep backend running)
+### 2. Navigate to the frontend folder
 
-Navigate to the frontend folder:
-
+```bash
 cd frontend
+```
 
+### 3. Install dependencies
 
-Install dependencies:
-
+```bash
 npm install
+```
 
+### 4. Run the frontend server
 
-or
-
-yarn install
-
-
-Run the frontend server:
-
+```bash
 npm run dev
+```
 
+🌐 **Frontend running at:** http://localhost:3000
 
-or
+---
 
-yarn dev
+## 🔗 Connecting Frontend and Backend
 
+In your frontend API service (e.g. `frontend/utils/api.js`), ensure your backend URL is set to:
 
-🌐 Frontend running at:
-http://localhost:3000
-
-🔗 Connecting Frontend and Backend
-
-In your frontend API service (e.g. frontend/utils/api.js),
-ensure your backend URL is set to:
-
+```js
 const API_BASE_URL = "http://127.0.0.1:8000";
+```
 
+### Example query:
 
-Example query:
-
+```js
 const response = await fetch(`${API_BASE_URL}/ask`, {
   method: "POST",
   body: JSON.stringify({ query: "What are the requirements for Diploma in Computer Science?" }),
-  headers: { "Content-Type": "application
+  headers: { "Content-Type": "application/json" },
+});
+```
