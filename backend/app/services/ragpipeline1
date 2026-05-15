@@ -1,0 +1,677 @@
+"""
+RAG Pipeline for UiTM Program Query System
+Supports both Malay and English queries
+"""
+
+from typing import Dict, List, Optional
+from app.core.embedding_model import EmbeddingModel
+from app.core.chroma_client import ChromaClient
+from app.core.ollama_client import query_ollama
+from app.services.ingest_service import (
+    detect_program_level,
+    detect_program_name,
+    detect_qualification_type
+)
+import re
+
+
+def detect_query_language(query: str) -> str:
+    """Detect if query is in Malay or English"""
+    malay_keywords = [
+        'apa', 'apakah', 'berapa', 'bagaimana', 'boleh', 'saya', 'yang',
+        'untuk', 'syarat', 'keperluan', 'kemasukan', 'perbezaan', 'beza',
+        'antara', 'dengan', 'ada', 'atau', 'dan', 'ini', 'itu',
+        'sijil', 'diploma', 'sarjana', 'lepasan', 'minimum', 'kepujian'
+    ]
+    
+    english_keywords = [
+        'what', 'how', 'can', 'requirements', 'entry', 'admission',
+        'difference', 'between', 'compare', 'need', 'required',
+        'minimum', 'qualification', 'degree', 'bachelor', 'cgpa'
+    ]
+    
+    query_lower = query.lower()
+    
+    malay_count = sum(1 for word in malay_keywords if word in query_lower)
+    english_count = sum(1 for word in english_keywords if word in query_lower)
+    
+    return 'malay' if malay_count > english_count else 'english'
+
+
+def deduplicate_documents(docs: List[str], threshold: float = 0.85) -> List[str]:
+    """Remove duplicate or highly similar documents"""
+    from difflib import SequenceMatcher
+    
+    if not docs:
+        return []
+    
+    unique_docs = list(dict.fromkeys(docs))
+    
+    filtered_docs = []
+    for doc in unique_docs:
+        is_duplicate = False
+        for existing_doc in filtered_docs:
+            similarity = SequenceMatcher(None, doc, existing_doc).ratio()
+            if similarity > threshold:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            filtered_docs.append(doc)
+    
+    return filtered_docs
+
+
+def extract_program_code_from_query(query: str) -> Optional[str]:
+    """Extract program code if mentioned in query"""
+    match = re.search(r'\b[A-Z]{2,4}\d{3}\b', query.upper())
+    if match:
+        return match.group(0)
+    return None
+
+
+def is_generic_program_query(query: str, program_name: str) -> bool:
+    """Check if user is asking about generic program vs specialized variant"""
+    if program_name in ["Unknown", "Unspecified"]:
+        return False
+    
+    query_lower = query.lower()
+    
+    comparison_keywords = [
+        'perbezaan', 'beza', 'difference', 'compare', 'berbanding',
+        'vs', 'versus', 'atau', 'or', 'comparison'
+    ]
+    is_comparison = any(kw in query_lower for kw in comparison_keywords)
+    
+    if is_comparison:
+        return False
+    
+    specialized_keywords = [
+        'rangkaian', 'multimedia', 'grafik', 'digital', 'forensik',
+        'sistem', 'perisian', 'mobile', 'keselamatan',
+        'robotik', 'data', 'awan',
+        'network', 'networking', 'graphics', 'forensics', 'systems',
+        'software', 'security', 'web', 'game', 'games',
+        'artificial', 'intelligence', 'cloud', 'cyber', 'embedded',
+        'robotics', 'data science', 'machine learning'
+    ]
+    
+    for keyword in specialized_keywords:
+        if keyword in query_lower:
+            return False
+    
+    if program_name.lower() in query_lower:
+        words_after_program = query_lower.split(program_name.lower())
+        if len(words_after_program) > 1:
+            remaining_text = words_after_program[1].strip()
+            if len(remaining_text.split()) > 2:
+                return False
+        return True
+    
+    return True
+
+
+def prioritize_generic_programs(docs: List[str], metadatas: List[Dict], 
+                                  query: str, program_name: str) -> tuple:
+    """
+    Reorder results to prioritize generic/base programs over specialized variants.
+    For example: "Diploma Sains Komputer" should come before "Diploma Sains Komputer (Rangkaian Komputer)"
+    """
+    if not is_generic_program_query(query, program_name):
+        return docs, metadatas
+    
+    generic_docs = []
+    generic_metas = []
+    specialized_docs = []
+    specialized_metas = []
+    
+    # Keywords that indicate specialization
+    specialization_indicators = [
+        'rangkaian', 'multimedia', 'grafik', 'forensik', 'keselamatan',
+        'network', 'graphics', 'security', 'web', 'mobile', 'game',
+        'artificial intelligence', 'data science', 'cloud', 'cyber',
+        '(', ')',  # Parentheses often indicate specialization
+    ]
+    
+    for doc, meta in zip(docs, metadatas):
+        prog_name = meta.get('program_name', '').lower()
+        prog_code = meta.get('program_code_uitm', '')
+        
+        # Check if this is a specialized program
+        is_specialized = any(indicator in prog_name for indicator in specialization_indicators)
+        
+        # Also check if program name is much longer than base name (indicates specialization)
+        base_program_lower = program_name.lower()
+        if base_program_lower in prog_name:
+            # If program name has significantly more words, it's likely specialized
+            base_word_count = len(base_program_lower.split())
+            prog_word_count = len(prog_name.split())
+            if prog_word_count > base_word_count + 2:
+                is_specialized = True
+        
+        if is_specialized:
+            specialized_docs.append(doc)
+            specialized_metas.append(meta)
+        else:
+            generic_docs.append(doc)
+            generic_metas.append(meta)
+    
+    # Return generic programs first, then specialized
+    print(f"  📊 Prioritization: {len(generic_docs)} base programs, {len(specialized_docs)} specialized programs")
+    return generic_docs + specialized_docs, generic_metas + specialized_metas
+
+
+def build_smart_filter(level: str, program_name: str, qual_type: Optional[str] = None, 
+                       program_code: Optional[str] = None) -> Optional[Dict]:
+    """Build intelligent filter for ChromaDB query"""
+    conditions = []
+
+    if program_code:
+        return {"program_code_uitm": {"$eq": program_code}}
+
+    # Always filter by level if specified
+    if level and level not in ["Unspecified", "Unknown"]:
+        conditions.append({"program_level": {"$eq": level}})
+
+    # Filter by program name with contains
+    if program_name and program_name not in ["Unknown", "Unspecified"]:
+        base_name = program_name.replace("Diploma ", "").replace("Degree ", "").replace("Sarjana Muda ", "").strip()
+        conditions.append({"program_name": {"$contains": base_name}})
+
+    # Filter by qualification type if explicitly mentioned
+    if qual_type and qual_type.upper() != "DIPLOMA":
+        conditions.append({"requirement_type": {"$eq": qual_type.upper()}})
+
+    if len(conditions) == 0:
+        return None
+    elif len(conditions) == 1:
+        return conditions[0]
+    else:
+        return {"$and": conditions}
+
+
+def format_context(docs: List[str], metadatas: List[Dict]) -> str:
+    """Format retrieved documents into clean context"""
+    formatted_sections = []
+    
+    for doc, meta in zip(docs, metadatas):
+        section = f"""
+--- {meta.get('program_name', 'Program')} ---
+Code: {meta.get('program_code_uitm', 'N/A')}
+Level: {meta.get('program_level', 'N/A')}
+
+{doc}
+"""
+        formatted_sections.append(section.strip())
+    
+    return "\n\n".join(formatted_sections)
+
+
+def generate_answer(query: str, max_tokens: int = 2048, temperature: float = 0.3) -> str:
+    """
+    Generate answer using RAG pipeline - supports both Malay and English
+    
+    Args:
+        query: User's question in Malay or English
+        max_tokens: Maximum tokens for LLM response
+        temperature: LLM temperature (lower = more focused)
+    
+    Returns:
+        Generated answer string
+    """
+    print("\n" + "=" * 60)
+    print("🔍 RAG Pipeline Started")
+    print("=" * 60)
+    
+    language = detect_query_language(query)
+    print(f"🌐 Detected Language: {language.upper()}")
+    
+    embedder = EmbeddingModel()
+    chroma = ChromaClient()
+
+    level = detect_program_level(query)
+    program_name = detect_program_name(query)
+    qual_type = detect_qualification_type(query)
+    program_code = extract_program_code_from_query(query)
+
+    print(f"📊 Query Analysis:")
+    print(f"  • Program Level: {level}")
+    print(f"  • Program Name: {program_name}")
+    print(f"  • Qualification Type: {qual_type}")
+    print(f"  • Program Code: {program_code if program_code else 'Not specified'}")
+
+    query_parts = [query]
+    
+    comparison_keywords = [
+        'perbezaan', 'beza', 'difference', 'compare', 'berbanding',
+        'vs', 'versus', 'comparison'
+    ]
+    is_comparison = any(kw in query.lower() for kw in comparison_keywords)
+    
+    if not is_comparison and level != "Unspecified":
+        query_parts.append(level)
+    
+    if program_name != "Unknown":
+        base_name = program_name.replace("Diploma ", "").replace("Degree ", "").strip()
+        query_parts.append(base_name)
+    
+    enhanced_query = " ".join(query_parts)
+    print(f"  • Enhanced Query: {enhanced_query}")
+
+    try:
+        query_embed = embedder.encode([enhanced_query])[0]
+        print(f"✅ Generated query embedding")
+    except Exception as e:
+        print(f"❌ Embedding error: {e}")
+        error_msg = "⚠️ Error processing query. Please try again." if language == 'english' else "⚠️ Ralat semasa memproses pertanyaan. Sila cuba lagi."
+        return error_msg
+
+    if is_comparison:
+        where_filter = build_smart_filter("Unspecified", program_name, None, program_code)
+    else:
+        where_filter = build_smart_filter(level, program_name, qual_type, program_code)
+    
+    print(f"🔧 Filter: {where_filter}")
+
+    print(f"🔍 Querying ChromaDB...")
+    try:
+        results = chroma.query(
+            query_embedding=query_embed,
+            n_results=10,
+            where=where_filter
+        )
+        print(f"✅ Query successful")
+    except Exception as e:
+        print(f"⚠️ ChromaDB query failed with filter: {e}")
+        print(f"🔄 Retrying without filter...")
+        try:
+            results = chroma.query(
+                query_embedding=query_embed,
+                n_results=15
+            )
+            print(f"✅ Query successful without filter")
+        except Exception as e2:
+            print(f"❌ ChromaDB error: {e2}")
+            error_msg = "⚠️ Error accessing database. Please try again." if language == 'english' else "⚠️ Ralat semasa mengakses pangkalan data. Sila cuba lagi."
+            return error_msg
+
+    if not results or not results.get("documents") or not results["documents"][0]:
+        print("❌ No relevant documents found")
+        error_msg = "⚠️ No relevant information found in the UiTM database." if language == 'english' else "⚠️ Tiada maklumat relevan dijumpai dalam pangkalan data UiTM."
+        return error_msg
+
+    raw_docs = results["documents"][0]
+    raw_metadatas = results.get("metadatas", [[]])[0]
+    
+    print(f"📄 Retrieved {len(raw_docs)} documents")
+    
+    if is_comparison:
+        diploma_docs = [(d, m) for d, m in zip(raw_docs, raw_metadatas) if m.get('program_level') == 'Diploma']
+        degree_docs = [(d, m) for d, m in zip(raw_docs, raw_metadatas) if m.get('program_level') == 'Degree']
+        
+        selected_docs = []
+        selected_metas = []
+        
+        for d, m in (diploma_docs[:3] + degree_docs[:3]):
+            selected_docs.append(d)
+            selected_metas.append(m)
+        
+        raw_docs = selected_docs
+        raw_metadatas = selected_metas
+    # Apply prioritization for generic queries (always for non-comparison single program queries)
+    if program_name not in ["Unknown", "Unspecified"] and not is_comparison:
+        print(f"  🎯 Applying prioritization for '{program_name}'")
+        raw_docs, raw_metadatas = prioritize_generic_programs(
+            raw_docs, raw_metadatas, query, program_name
+        )
+    
+    unique_docs = deduplicate_documents(raw_docs, threshold=0.85)
+    print(f"🧹 After deduplication: {len(unique_docs)} documents")
+    
+    unique_metadatas = []
+    for doc in unique_docs:
+        try:
+            idx = raw_docs.index(doc)
+            if idx < len(raw_metadatas):
+                unique_metadatas.append(raw_metadatas[idx])
+            else:
+                unique_metadatas.append({})
+        except ValueError:
+            unique_metadatas.append({})
+    
+    num_docs = 8 if is_comparison else 5
+    context = format_context(unique_docs[:num_docs], unique_metadatas[:num_docs])
+    print(f"📝 Context length: {len(context)} characters")
+    
+    print(f"📚 Programs in context:")
+    for i, meta in enumerate(unique_metadatas[:num_docs]):
+        prog_name = meta.get('program_name', 'Unknown')
+        prog_code = meta.get('program_code_uitm', 'N/A')
+        chunk_type = meta.get('chunk_type', 'N/A')
+        print(f"  {i+1}. {prog_name} ({prog_code}) - {chunk_type}")
+
+    # Construct prompts based on language
+    if language == 'english':
+        if is_comparison:
+            prompt = f"""You are a UiTM Academic Officer helping prospective students compare programs.
+
+Based on the official UiTM documents below, answer the student's question completely and accurately in formal English.
+
+=== OFFICIAL UiTM INFORMATION ===
+{context}
+
+=== STUDENT QUESTION ===
+{query}
+
+=== IMPORTANT INSTRUCTIONS ===
+1. You MUST respond ENTIRELY in English. Translate any Malay terms from the context into English.
+2. Use ONLY information from the context above. Do not fabricate any information.
+3. COMPARE both programs clearly (Diploma vs Degree/Bachelor).
+4. Structure your answer with:
+   - **Program Names and Codes** (ensure codes are EXACTLY from context)
+   - **Duration**
+   - **Entry Requirements** (translate all Malay terms to English)
+     * "KEPUJIAN" = "Credit", "LULUS" = "Pass"
+     * "Matematik" = "Mathematics", "Bahasa Melayu" = "Malay Language"
+   - **CGPA Requirements** (if specified)
+   - **MUET Requirements** (Band 1-6)
+   - **Key Differences**
+5. Use bullet points for clarity.
+6. If specific information is missing, state "Information not available in the documents".
+
+CRITICAL: 
+- Respond COMPLETELY in English
+- All program codes MUST match exactly what's in the context
+- Translate all Malay terms to English
+
+Your answer:"""
+        else:
+            prompt = f"""You are a UiTM Academic Officer helping prospective students.
+
+Based on the official UiTM documents below, answer the student's question completely and accurately in formal English.
+
+=== OFFICIAL UiTM INFORMATION ===
+{context}
+
+=== STUDENT QUESTION ===
+{query}
+
+=== IMPORTANT INSTRUCTIONS ===
+1. You MUST respond ENTIRELY in English. Translate any Malay terms from the context into English.
+2. Use ONLY information from the context above. Do not fabricate any information.
+3. If the question is about a BASE program (e.g., "Diploma in Computer Science" without any specialization), use information from the BASE program ONLY, NOT specialized variants (like Network Computing, Multimedia, etc.).
+4. Structure your answer clearly:
+   - **Program Name and Code** (ensure code is EXACTLY from context and matches the program being asked about)
+   - **Level** (Diploma/Degree)
+   - **Duration**
+   - **Faculty/College**
+   - **Entry Requirements:**
+     * SPM Requirements (if available)
+       - Translate: "KEPUJIAN" = "Credit", "LULUS" = "Pass", "Bahasa Melayu" = "Malay Language"
+     * Certificate Requirements (if available)
+     * Pre-Diploma Requirements (if available)
+     * APEL Requirements (if available)
+   - **CGPA Requirements** (if applicable)
+   - **MUET Requirements** (Band 1-6)
+   - **Eligibility** (translate: "Terbuka kepada" = "Open to", "keturunan Melayu" = "Bumiputera/Malay descendants")
+5. Use bullet points for easy reading.
+6. Translate subject names: "Matematik" = "Mathematics", "Sains" = "Science", etc.
+7. If information is incomplete, state: "Information not available in the documents".
+
+CRITICAL: 
+- Respond COMPLETELY in English
+- Ensure the program answered matches what was asked!
+- If asked about "Diploma in Computer Science", answer about CDCS110, NOT CDCS255 (Network Computing)
+- Program codes MUST match exactly what's in the context
+- Translate all Malay terms to English
+
+Your answer:"""
+    else:  # Malay
+        if is_comparison:
+            prompt = f"""Anda adalah Pegawai Akademik UiTM yang membantu bakal pelajar membandingkan program.
+
+Berdasarkan maklumat rasmi dari dokumen UiTM di bawah, jawab soalan pelajar dengan lengkap dan tepat dalam Bahasa Malaysia yang formal.
+
+=== MAKLUMAT RASMI UiTM ===
+{context}
+
+=== SOALAN PELAJAR ===
+{query}
+
+=== ARAHAN PENTING ===
+1. Gunakan HANYA maklumat dari konteks di atas. Jangan reka maklumat baharu.
+2. BANDINGKAN kedua-dua program dengan jelas (Diploma vs Ijazah/Degree).
+3. Struktur jawapan anda:
+   - Nama Program dan Kod (pastikan kod TEPAT dari konteks)
+   - Tempoh Pengajian
+   - Syarat Kemasukan (senaraikan SEMUA yang dinyatakan)
+   - Keperluan CGPA (jika dinyatakan)
+   - Keperluan MUET
+   - Perbezaan Utama
+4. Gunakan bullet points untuk kejelasan.
+5. Jika maklumat tertentu tidak ada, nyatakan "Maklumat tidak tersedia dalam dokumen".
+
+PENTING: Kod program MESTI tepat dengan konteks!
+
+Jawapan anda:"""
+        else:
+            prompt = f"""Anda adalah Pegawai Akademik UiTM yang membantu bakal pelajar.
+
+Berdasarkan maklumat rasmi dari dokumen UiTM di bawah, jawab soalan pelajar dengan lengkap dan tepat dalam Bahasa Malaysia yang formal.
+
+=== MAKLUMAT RASMI UiTM ===
+{context}
+
+=== SOALAN PELAJAR ===
+{query}
+
+=== ARAHAN PENTING ===
+1. Gunakan HANYA maklumat dari konteks di atas. Jangan reka maklumat baharu.
+2. Jika soalan adalah tentang program ASAS (contoh: "Diploma Sains Komputer" sahaja tanpa kepakaran khusus), gunakan maklumat dari program ASAS tersebut, BUKAN program berkepakaran (seperti Rangkaian Komputer, Multimedia, dll.).
+3. Struktur jawapan anda dengan jelas:
+   - **Nama Program dan Kod** (pastikan kod TEPAT dari konteks dan sepadan dengan program yang ditanya)
+   - **Tahap** (Diploma/Degree)
+   - **Tempoh Pengajian**
+   - **Fakulti/Kolej**
+   - **Syarat Kemasukan:**
+     * Senaraikan SEMUA syarat yang dinyatakan dalam konteks
+     * Sertakan mata pelajaran dan gred spesifik
+     * Nyatakan SEMUA laluan kelayakan (SPM, STPM, Diploma, Sijil, Pra Diploma, APEL, dll.) jika ada
+   - **Keperluan CGPA** (jika berkaitan)
+   - **Keperluan MUET**
+   - **Kelayakan**
+4. Gunakan bullet points untuk mudah dibaca.
+5. Jika maklumat tidak lengkap, nyatakan: "Maklumat tidak tersedia dalam dokumen".
+6. Beri jawapan yang menyeluruh - sertakan SEMUA butiran dari konteks.
+
+PENTING: 
+- Pastikan program yang dijawab adalah TEPAT dengan yang ditanya!
+- Jika ditanya tentang "Diploma Sains Komputer", jawab tentang CDCS110, BUKAN CDCS255 (Rangkaian Komputer)
+- Kod program MESTI tepat dengan konteks!
+
+Jawapan anda:"""
+
+    print(f"🤖 Querying Ollama LLM...")
+    try:
+        response = query_ollama(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        
+        if not response or len(response.strip()) < 10:
+            print("❌ Empty or invalid response from LLM")
+            error_msg = "⚠️ No valid response from model. Please try again." if language == 'english' else "⚠️ Tiada respons yang sah daripada model. Sila cuba lagi."
+            return error_msg
+        
+        print(f"✅ Generated response ({len(response)} characters)")
+        print("=" * 60)
+        
+        return response.strip()
+        
+    except Exception as e:
+        print(f"❌ Ollama error: {e}")
+        error_msg = "⚠️ Error generating response. Please try again." if language == 'english' else "⚠️ Ralat semasa menjana respons. Sila cuba lagi."
+        return error_msg
+
+
+def generate_answer_with_sources(query: str) -> Dict[str, any]:
+    """
+    Generate answer with source attribution
+    
+    Returns:
+        Dictionary with 'answer', 'sources', and 'metadata'
+    """
+    language = detect_query_language(query)
+    
+    embedder = EmbeddingModel()
+    chroma = ChromaClient()
+
+    level = detect_program_level(query)
+    program_name = detect_program_name(query)
+    qual_type = detect_qualification_type(query)
+    program_code = extract_program_code_from_query(query)
+
+    comparison_keywords = [
+        'perbezaan', 'beza', 'difference', 'compare', 'berbanding',
+        'vs', 'versus', 'comparison'
+    ]
+    is_comparison = any(kw in query.lower() for kw in comparison_keywords)
+
+    query_parts = [query]
+    
+    if not is_comparison and level != "Unspecified":
+        query_parts.append(level)
+    
+    if program_name != "Unknown":
+        base_name = program_name.replace("Diploma ", "").replace("Degree ", "").strip()
+        query_parts.append(base_name)
+    
+    enhanced_query = " ".join(query_parts)
+    query_embed = embedder.encode([enhanced_query])[0]
+
+    if is_comparison:
+        where_filter = build_smart_filter("Unspecified", program_name, None, program_code)
+    else:
+        where_filter = build_smart_filter(level, program_name, qual_type, program_code)
+
+    try:
+        results = chroma.query(
+            query_embedding=query_embed,
+            n_results=10,
+            where=where_filter
+        )
+    except Exception as e:
+        print(f"Query with filter failed: {e}, retrying without filter")
+        try:
+            results = chroma.query(
+                query_embedding=query_embed,
+                n_results=15
+            )
+        except:
+            results = None
+
+    if not results or not results.get("documents") or not results["documents"][0]:
+        error_msg = "⚠️ No relevant information found." if language == 'english' else "⚠️ Tiada maklumat relevan dijumpai."
+        return {
+            "answer": error_msg,
+            "sources": [],
+            "metadata": {
+                "level": level,
+                "program": program_name,
+                "qualification": qual_type,
+                "program_code": program_code,
+                "language": language
+            }
+        }
+
+    raw_docs = results["documents"][0]
+    raw_metadatas = results.get("metadatas", [[]])[0]
+    raw_distances = results.get("distances", [[]])[0] if results.get("distances") else []
+    
+    if is_comparison:
+        diploma_docs = [(d, m, i) for i, (d, m) in enumerate(zip(raw_docs, raw_metadatas)) if m.get('program_level') == 'Diploma']
+        degree_docs = [(d, m, i) for i, (d, m) in enumerate(zip(raw_docs, raw_metadatas)) if m.get('program_level') == 'Degree']
+        
+        selected = diploma_docs[:3] + degree_docs[:3]
+        raw_docs = [d for d, m, i in selected]
+        raw_metadatas = [m for d, m, i in selected]
+        raw_distances = [raw_distances[i] for d, m, i in selected if i < len(raw_distances)]
+    
+    # Apply prioritization for generic queries
+    if program_name not in ["Unknown", "Unspecified"] and not is_comparison:
+        raw_docs, raw_metadatas = prioritize_generic_programs(
+            raw_docs, raw_metadatas, query, program_name
+        )
+    
+    unique_docs = deduplicate_documents(raw_docs, threshold=0.85)
+    
+    unique_metadatas = []
+    unique_distances = []
+    for doc in unique_docs:
+        try:
+            idx = raw_docs.index(doc)
+            if idx < len(raw_metadatas):
+                unique_metadatas.append(raw_metadatas[idx])
+                if idx < len(raw_distances):
+                    unique_distances.append(raw_distances[idx])
+                else:
+                    unique_distances.append(1.0)
+            else:
+                unique_metadatas.append({})
+                unique_distances.append(1.0)
+        except ValueError:
+            unique_metadatas.append({})
+            unique_distances.append(1.0)
+    
+    num_docs = 8 if is_comparison else 5
+    context = format_context(unique_docs[:num_docs], unique_metadatas[:num_docs])
+
+    # Generate answer with same prompts as generate_answer()
+    answer = generate_answer(query, max_tokens=2048, temperature=0.3)
+
+    sources = []
+    for i, (doc, meta) in enumerate(zip(unique_docs[:num_docs], unique_metadatas[:num_docs])):
+        source = {
+            "rank": i + 1,
+            "program_name": meta.get("program_name", "Unknown"),
+            "program_code": meta.get("program_code_uitm", "Unknown"),
+            "program_level": meta.get("program_level", "Unknown"),
+            "source_file": meta.get("source", "Unknown"),
+            "chunk_type": meta.get("chunk_type", "Unknown"),
+            "similarity": 1 - unique_distances[i] if i < len(unique_distances) else 0,
+            "excerpt": doc[:200] + "..." if len(doc) > 200 else doc
+        }
+        sources.append(source)
+
+    return {
+        "answer": answer,
+        "sources": sources,
+        "metadata": {
+            "level": level,
+            "program": program_name,
+            "qualification": qual_type,
+            "program_code": program_code,
+            "is_comparison": is_comparison,
+            "num_sources": len(sources),
+            "language": language
+        }
+    }
+
+
+# For backwards compatibility
+def batch_generate_answers(queries: List[str]) -> List[Dict[str, any]]:
+    """Generate answers for multiple queries"""
+    results = []
+    for i, query in enumerate(queries, 1):
+        print(f"\n{'='*60}")
+        print(f"Query {i}/{len(queries)}: {query}")
+        print(f"{'='*60}")
+        
+        result = generate_answer_with_sources(query)
+        results.append({
+            "query": query,
+            **result
+        })
+    
+    return results

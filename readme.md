@@ -129,6 +129,18 @@ npm run dev
 
 ---
 
+## 🛠️ Debugging & Diagnostics
+
+If you encounter issues or want to inspect the system state, you can use these utility scripts (run from the `backend` directory):
+
+| Script | Command | Purpose |
+|---|---|---|
+| 🔍 **Inspect Database** | `python -m app.inspect_db` | View the contents of the ChromaDB vector store. |
+| 🛠️ **Diagnostic Script** | `python -m app.diagnostic_script` | Run system-wide checks for connectivity and RAG health. |
+| 📊 **Visualize** | `python -m app.visualize` | Generate visualizations of the RAG pipeline or data. |
+
+---
+
 ## 🔗 Connecting Frontend and Backend
 
 In your frontend API service (e.g. `frontend/utils/api.js`), ensure your backend URL is set to:

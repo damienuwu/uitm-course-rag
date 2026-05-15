@@ -65,6 +65,7 @@ pytest_cache/
 *.pid
 uploads/
 data/
+chroma_db/
 tmp/
 
 # IDE / OS

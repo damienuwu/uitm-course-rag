@@ -67,13 +67,20 @@ def get_chat_history(session_id: int, db: Session = Depends(get_session)):
 
 # --- HELPER FUNCTIONS ---
 def detect_language(query: str) -> str:
-    malay_keywords = ["syarat", "kelayakan", "boleh", "tak", "macam", "mana", "apa", "uitm", "lepasan", "asasi", "matrik", "terima", "kasih", "sama", "minat", "suka"]
-    return "MALAY" if any(k in query.lower() for k in malay_keywords) else "ENGLISH"
+    malay_keywords = ["syarat", "kelayakan", "boleh", "tak", "macam", "mana", "apa", "uitm", "lepasan", "asasi", "matrik", "terima", "kasih", "sama", "minat", "suka", "layak"]
+    lang = "MALAY" if any(k in query.lower() for k in malay_keywords) else "ENGLISH"
+    # LOG FOR TC-01
+    print(f"DEBUG [TC-01]: Language Detected: {lang}") 
+    return lang
 
 def is_conversational(query: str) -> bool:
     triggers = ["hi", "hello", "assalamualaikum", "salam", "terima kasih", "thanks", "tq", "thank you", "baik", "okay", "ok", "bye"]
     clean_q = query.strip().lower()
-    return clean_q in triggers or (len(clean_q.split()) < 5 and any(t in clean_q for t in triggers))
+    result = clean_q in triggers or (len(clean_q.split()) < 5 and any(t in clean_q for t in triggers))
+    # LOG FOR TC-05
+    if result:
+        print(f"DEBUG [TC-05]: Conversational Intent detected for query: '{query}'. Bypassing RAG.")
+    return result
 
 # --- MAIN CHAT LOGIC ---
 @router.post("/chat")
@@ -86,7 +93,6 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_session)):
 
     # 1. CONVERSATIONAL CHECK
     if is_conversational(q):
-        print(f"💬 Conversational: {q}")
         prompt = f"""
         You are a polite UiTM Academic Advisor. User said: "{q}".
         Reply politely in {language}. Keep it short and natural. Do NOT repeat the user's text.
@@ -95,8 +101,8 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_session)):
 
     else:
         # 2. ACADEMIC RAG
-        print(f"🔍 RAG Mode: {q}")
-        context = rag.retrieve_context(q)
+        print(f"DEBUG [TC-02]: Intent-Based Query Boosting Mode Active.")
+        context = rag.retrieve_context(q) # This will trigger RAGPipeline logs for TC-02 and TC-03
 
         is_degree = any(k in q.upper() for k in ["DEGREE", "SARJANA MUDA", "IJAZAH", "BACHELOR"])
         
@@ -122,6 +128,8 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_session)):
         selected_guide = degree_guide if is_degree else diploma_guide
 
         if context:
+            # LOG FOR TC-04
+            print(f"DEBUG [TC-04]: Applying Degree/Diploma Guide formatting to LLM Prompt.")
             prompt = f"""
             You are an expert Academic Advisor for UiTM. 
             
@@ -145,6 +153,8 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_session)):
                - If general/recommendation, use bullet points.
             """
         else:
+            # LOG FOR TC-06
+            print(f"DEBUG [TC-06]: No relevant documents found in ChromaDB. Using Fallback Response.")
             prompt = f"""
             You are a helpful AI Assistant. User asked: "{request.query}".
             I found no specific UiTM documents. 
@@ -156,6 +166,8 @@ def chat_endpoint(request: QueryRequest, db: Session = Depends(get_session)):
     db.add(ChatMessage(session_id=request.session_id, role="assistant", content=final_answer))
     db.commit()
 
+    # LOG FOR TC-07
+    print(f"DEBUG [TC-07]: Returning JSON payload. Status: Success.")
     return {"role": "assistant", "content": final_answer}
 
 app.include_router(router)
